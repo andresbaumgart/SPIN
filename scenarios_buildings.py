@@ -15,9 +15,7 @@ Purpose: Building stock projections with appliance integration
 # Building renovation: How to implement (MISO only takes stock projections)
 # Stocks in office conversion and vacant space use lower than baseline because stock already exists (not repurposed)
 # Vacant use scenario: new construction drops to almost zero because vacant building is used up AND population growth (driver of households) is near zero in this decade (see population projection)
-# Add scenario with Shared floor space
-# Check with Jule regading policies informing scenario design
-# Heating systems: Check heating demand per building type and age cohort, renovated and unrenvoated -> Check how many heating systems there currently are; then check how many have to be installed in the future based on temperature projections and Lukas Kranzl data (see CeAT)
+# Shared Appliances scenario: 30% reduction in washing machines and dryers through shared laundry rooms by 2060
 
 ######################################################################################################################################################
 ######################################################################################################################################################
@@ -75,7 +73,16 @@ def load_scenario_parameters(file_path, scenario_name, base_region_shares=None):
             region_shares = base_region_shares.copy() if base_region_shares else {}
     
     apply_conversion = str(scenario.get('Apply Conversion', False)).lower() in ['true', '1', 'yes']
-    conv_rate = float(str(scenario.get('Conversion Rate', 0.0)).replace(',', '.').strip() or 0.0)
+    
+    # Handle conversion rate - if it's a dash or empty string, default to 0.0
+    conv_rate_str = str(scenario.get('Conversion Rate', 0.0)).replace(',', '.').strip()
+    if conv_rate_str == '-' or conv_rate_str == '':
+        conv_rate = 0.0
+    else:
+        try:
+            conv_rate = float(conv_rate_str)
+        except ValueError:
+            conv_rate = 0.0
     
     source_types = [s.strip() for s in str(scenario.get('Source Type', '-')).split(';') if s.strip() and s.strip() != '-']
     target_types = [t.strip() for t in str(scenario.get('Target Type', '-')).split(';') if t.strip() and t.strip() != '-']
@@ -88,6 +95,24 @@ def load_scenario_parameters(file_path, scenario_name, base_region_shares=None):
         # Fallback: detect by scenario name
         reduced_construction = 'Reduced' in scenario_name or 'reduced' in scenario_name.lower()
     
+    # Read Appliance Sharing factor from Excel
+    # Percentage of appliances shared (reduction in appliance count)
+    if 'Appliances Sharing' in df_scenarios.columns:
+        sharing_val = str(scenario.get('Appliances Sharing', 0.0)).replace(',', '.').strip()
+        if sharing_val == '-' or sharing_val == '':
+            appliance_sharing = 0.0
+        else:
+            try:
+                appliance_sharing = float(sharing_val)
+            except ValueError:
+                appliance_sharing = 0.0
+    else:
+        appliance_sharing = 0.0
+    
+    # Read Start Year and End Year (apply to ALL policies)
+    start_year = int(scenario.get('Start Year', 2024))
+    end_year = int(scenario.get('End Year', 2060))
+    
     return {
         'reduction_factors': reduction_factors,
         'urban_shift': {'apply': apply_urban_shift, 'region_shares': region_shares, 'urban_share': urban_share_value},
@@ -96,11 +121,14 @@ def load_scenario_parameters(file_path, scenario_name, base_region_shares=None):
             'source_types': source_types,
             'target_types': target_types,
             'conversion_rate': conv_rate,
-            'start_year': int(scenario.get('Start Year', 2024)),
-            'end_year': int(scenario.get('End Year', 2060)),
+            'start_year': start_year,
+            'end_year': end_year,
             'linear': True
         },
         'reduced_construction': reduced_construction,
+        'appliance_sharing': appliance_sharing,
+        'start_year': start_year,
+        'end_year': end_year,
         'metadata': {'Scenario Name': scenario.get('Scenario Name', 'Unknown'), 'Scenario Description': scenario.get('Description', '')}
     }
 
@@ -108,18 +136,18 @@ def load_scenario_parameters(file_path, scenario_name, base_region_shares=None):
 ######################################################################################################################################################
 #%% Building projection
 
-def get_reduction_factor(year, base_year, target_factor, phase_in_year=2040):
+def get_reduction_factor(year, base_year, target_factor, start_year, end_year):
     """
     Calculate the reduction factor for a given year.
-    Starts at 1.0 in base year, gradually reaches target_factor by phase_in_year.
+    Starts at 1.0 at start_year, gradually reaches target_factor by end_year.
     """
-    if year <= base_year:
+    if year <= start_year:
         return 1.0
-    elif year >= phase_in_year:
+    elif year >= end_year:
         return target_factor
     else:
         # Linear interpolation between 1.0 and target_factor
-        progress = (year - base_year) / (phase_in_year - base_year)
+        progress = (year - start_year) / (end_year - start_year)
         return 1.0 - (1.0 - target_factor) * progress
 
 def run_scenario(scenario_name, scenario_params, stocks_buildings_base, pop_by_year):
@@ -142,6 +170,10 @@ def run_scenario(scenario_name, scenario_params, stocks_buildings_base, pop_by_y
     apply_future_region_shares = scenario_params['urban_shift']['apply']
     future_region_shares = scenario_params['urban_shift']['region_shares']
     conversion_params = scenario_params['conversion']
+    
+    # Get start/end years from scenario parameters
+    start_year = scenario_params.get('start_year', 2024)
+    end_year = scenario_params.get('end_year', 2040)
     
     conversion_mappings = []
     if conversion_params['apply']:
@@ -258,7 +290,7 @@ def run_scenario(scenario_name, scenario_params, stocks_buildings_base, pop_by_y
         for bldg_type, intensity in type_intensity.items():
             # Get the phase-in reduction factor for this year
             target_factor = original_reduction_factors.get(bldg_type, 1.0)
-            reduction_factor = get_reduction_factor(year, base_year, target_factor, phase_in_year=2040)
+            reduction_factor = get_reduction_factor(year, base_year, target_factor, start_year, end_year)
             
             needed = pop_growth * intensity * reduction_factor
             if conversion_params['apply'] and bldg_type in conv_reductions:
@@ -383,6 +415,8 @@ def project_appliances(scenario_name, scenario_params, annual_summary, appliance
     Households and appliances follow population growth in scenarios where floor area per capita decreases
     (Reduced Construction, Vacant Space Use, Office Conversion).
     In Baseline and Urban Shift, they follow floor area growth.
+    
+    Appliance sharing scenario reduces washing machines and dryers through shared laundry rooms.
     """
     
     base_year = annual_summary['Year'].min()
@@ -407,6 +441,12 @@ def project_appliances(scenario_name, scenario_params, annual_summary, appliance
     # Reduced Construction and Vacant Space Use also follow population
     use_population_driver = is_reduced or is_vacant or is_office_conversion
     
+    # Get appliance sharing factor and phase-in years
+    appliance_sharing_target = scenario_params.get('appliance_sharing', 0.0)
+    start_year = scenario_params.get('start_year', 2024)
+    end_year = scenario_params.get('end_year', 2060)
+    is_shared = 'Shared' in scenario_name and appliance_sharing_target > 0
+    
     projected_rows = []
     
     for _, row in annual_summary.iterrows():
@@ -427,6 +467,20 @@ def project_appliances(scenario_name, scenario_params, annual_summary, appliance
         for appliance, ratio in appliances_per_household.items():
             num_appliances = households * ratio
             
+            # Apply sharing reduction for washing machines and dryers
+            if is_shared and appliance in ['Washing Machine', 'Tumble Dryer']:
+                # Get sharing factor for this year (phase-in from Excel)
+                if year <= start_year:
+                    sharing_factor = 0.0
+                elif year >= end_year:
+                    sharing_factor = appliance_sharing_target
+                else:
+                    # Linear interpolation between 0 and target
+                    progress = (year - start_year) / (end_year - start_year)
+                    sharing_factor = appliance_sharing_target * progress
+                
+                num_appliances = num_appliances * (1 - sharing_factor)
+            
             projected_rows.append({
                 'Type_lv2': appliance,
                 'Year': year,
@@ -440,8 +494,8 @@ def project_appliances(scenario_name, scenario_params, annual_summary, appliance
 ######################################################################################################################################################
 #%% Projection execution
 
-# Add Vacant Space Use to the list of scenarios
-scenarios_to_run = ['Baseline', 'Office Conversion', 'Urban Shift', 'Reduced Construction', 'Vacant Space Use']
+# Add Shared Appliances to the list of scenarios
+scenarios_to_run = ['Baseline', 'Office Conversion', 'Urban Shift', 'Reduced Construction', 'Vacant Space Use', 'Shared Appliances']
 
 data_POP = read_excel(os.path.join(main_path, 'input/data_POP.xlsx'), sheet_name='MISO2_POP')
 stocks_buildings_base = pd.read_parquet('output/interim/stocks_buildings_base.parquet')
@@ -492,8 +546,9 @@ print("\n" + "="*80)
 print("GENERATING PLOTS")
 print("="*80)
 
-fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
+# Subplot 1: Cumulative Stock
 ax = axes[0]
 for name, df in all_results.items():
     ax.plot(df['Year'], df['Cumulative_Stock'] / 1e6, label=name, linewidth=2)
@@ -503,12 +558,24 @@ ax.set_title('Stock Growth Comparison')
 ax.legend()
 ax.grid(True, alpha=0.3)
 
+# Subplot 2: Annual New Construction
 ax = axes[1]
 for name, df in all_results.items():
     ax.plot(df['Year'], df['New_Additions'] / 1e6, label=name, linewidth=2)
 ax.set_xlabel('Year')
-ax.set_ylabel('New Additions (million m²)')
-ax.set_title('Annual New Construction Comparison')
+ax.set_ylabel('New Additions (million m²/year)')
+ax.set_title('Annual New Construction')
+ax.legend()
+ax.grid(True, alpha=0.3)
+
+# Subplot 3: Cumulative New Construction
+ax = axes[2]
+for name, df in all_results.items():
+    cumulative = df['New_Additions'].cumsum() / 1e6
+    ax.plot(df['Year'], cumulative, label=name, linewidth=2)
+ax.set_xlabel('Year')
+ax.set_ylabel('Cumulative New Construction (million m²)')
+ax.set_title('Cumulative New Construction')
 ax.legend()
 ax.grid(True, alpha=0.3)
 
