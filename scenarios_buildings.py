@@ -16,6 +16,7 @@ Purpose: Building stock projections with appliance integration
 # Stocks in office conversion and vacant space use lower than baseline because stock already exists (not repurposed)
 # Vacant use scenario: new construction drops to almost zero because vacant building is used up AND population growth (driver of households) is near zero in this decade (see population projection)
 # Shared Appliances scenario: 30% reduction in washing machines and dryers through shared laundry rooms by 2060
+# Heatng systems cannot properly be modelled as operational heating demand relies on age cohort which is quantified in MISO2 using lifetimes (model analogously in STACEY?) -> endogenize in MISO2
 
 ######################################################################################################################################################
 ######################################################################################################################################################
@@ -609,10 +610,6 @@ plt.savefig('output/scenarios/appliance_comparison.png', dpi=150, bbox_inches='t
 plt.show()
 
 #%%% Overall summary
-
-print("\n" + "="*80)
-print("SUMMARY STATISTICS")
-print("="*80)
 
 for scenario_name, df in all_results.items():
     last_year = df['Year'].max()
